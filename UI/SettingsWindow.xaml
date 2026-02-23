@@ -2,17 +2,28 @@
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="GameGuard Settings"
-        Height="530" Width="740"
+        Height="580" Width="780"
         WindowStartupLocation="CenterScreen"
         ResizeMode="CanMinimize">
 
     <Grid Margin="10">
         <Grid.RowDefinitions>
-            <RowDefinition Height="*"/>
-            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>  <!-- Consent notice -->
+            <RowDefinition Height="*"/>     <!-- Tabs -->
+            <RowDefinition Height="Auto"/>  <!-- Save / Cancel -->
         </Grid.RowDefinitions>
 
-        <TabControl Grid.Row="0">
+        <!-- ===== CONSENT NOTICE ===== -->
+        <Border Grid.Row="0"
+                Background="#FFF9C4" BorderBrush="#F9A825" BorderThickness="1"
+                CornerRadius="3" Padding="10,7" Margin="0,0,0,10">
+            <TextBlock TextWrapping="Wrap" FontWeight="SemiBold" Foreground="#5D4037">
+                &#x26A0;&#xFE0F;  This tool may automatically close selected applications during blocked time windows.
+                All enforcement actions are logged locally at %AppData%\GameGuard\log.jsonl.
+            </TextBlock>
+        </Border>
+
+        <TabControl Grid.Row="1">
 
             <!-- ===== BLOCKED APPS ===== -->
             <TabItem Header="Blocked Apps">
@@ -25,29 +36,41 @@
                     <ListView x:Name="AppsListView" Grid.Row="0" SelectionMode="Single">
                         <ListView.View>
                             <GridView>
-                                <GridViewColumn Header="Process Name" Width="160"
+                                <GridViewColumn Header="Display Name" Width="155"
+                                                DisplayMemberBinding="{Binding DisplayName}"/>
+                                <GridViewColumn Header="Kind" Width="80"
+                                                DisplayMemberBinding="{Binding Kind}"/>
+                                <GridViewColumn Header="Process" Width="155"
                                                 DisplayMemberBinding="{Binding ProcessName}"/>
-                                <GridViewColumn Header="Path" Width="390"
-                                                DisplayMemberBinding="{Binding Path}"/>
-                                <GridViewColumn Header="Path Pinned" Width="90"
-                                                DisplayMemberBinding="{Binding PathPinned}"/>
+                                <GridViewColumn Header="Path Pinned" Width="95">
+                                    <GridViewColumn.CellTemplate>
+                                        <DataTemplate>
+                                            <CheckBox IsChecked="{Binding PathPinned, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                                      HorizontalAlignment="Center"
+                                                      VerticalAlignment="Center"
+                                                      ToolTip="When checked, the process is only blocked if its path matches the registered path exactly."/>
+                                        </DataTemplate>
+                                    </GridViewColumn.CellTemplate>
+                                </GridViewColumn>
                             </GridView>
                         </ListView.View>
                     </ListView>
 
                     <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,8,0,0">
-                        <Button Content="Add App…" Width="90" Margin="0,0,8,0" Click="AddApp_Click"/>
-                        <Button Content="Remove Selected" Width="120" Margin="0,0,16,0" Click="RemoveApp_Click"/>
-                        <CheckBox x:Name="PinPathCheckBox"
-                                  Content="Pin to exact path (recommended)"
-                                  IsChecked="True"
-                                  VerticalAlignment="Center"/>
+                        <Button Content="Add Launcher" Width="105" Margin="0,0,8,0"
+                                Click="AddLauncher_Click"
+                                ToolTip="Adds a game launcher (Steam, Epic Games, etc). Path pinning is OFF by default — launcher paths may change after updates."/>
+                        <Button Content="Add Game" Width="90" Margin="0,0,8,0"
+                                Click="AddGame_Click"
+                                ToolTip="Adds a game executable. Path pinning is ON by default — prevents bypass by renaming the exe."/>
+                        <Button Content="Remove Selected" Width="120"
+                                Click="RemoveApp_Click"/>
                     </StackPanel>
                 </Grid>
             </TabItem>
 
-            <!-- ===== SCHEDULE ===== -->
-            <TabItem Header="Schedule">
+            <!-- ===== BLOCKED WINDOWS ===== -->
+            <TabItem Header="Blocked Windows">
                 <Grid Margin="6">
                     <Grid.RowDefinitions>
                         <RowDefinition Height="*"/>
@@ -55,23 +78,25 @@
                         <RowDefinition Height="Auto"/>
                     </Grid.RowDefinitions>
 
-                    <ListView x:Name="ScheduleListView" Grid.Row="0" SelectionMode="Single">
+                    <ListView x:Name="WindowsListView" Grid.Row="0" SelectionMode="Single">
                         <ListView.View>
                             <GridView>
-                                <GridViewColumn Header="Allowed Days" Width="310"
+                                <GridViewColumn Header="Days" Width="260"
                                                 DisplayMemberBinding="{Binding DaysDisplay}"/>
-                                <GridViewColumn Header="From" Width="80"
+                                <GridViewColumn Header="From" Width="70"
                                                 DisplayMemberBinding="{Binding Start}"/>
-                                <GridViewColumn Header="To" Width="80"
+                                <GridViewColumn Header="To" Width="70"
                                                 DisplayMemberBinding="{Binding End}"/>
+                                <GridViewColumn Header="Type" Width="85"
+                                                DisplayMemberBinding="{Binding WindowType}"/>
                             </GridView>
                         </ListView.View>
                     </ListView>
 
-                    <!-- New entry builder -->
-                    <GroupBox Grid.Row="1" Header="Add Allowed Window" Margin="0,8,0,0" Padding="8,4">
+                    <!-- New window builder -->
+                    <GroupBox Grid.Row="1" Header="Add Blocked Window" Margin="0,8,0,0" Padding="8,6">
                         <StackPanel>
-                            <WrapPanel Margin="0,2,0,6">
+                            <WrapPanel Margin="0,2,0,8">
                                 <CheckBox x:Name="DaySun" Content="Sun" Margin="0,0,10,0"/>
                                 <CheckBox x:Name="DayMon" Content="Mon" Margin="0,0,10,0" IsChecked="True"/>
                                 <CheckBox x:Name="DayTue" Content="Tue" Margin="0,0,10,0" IsChecked="True"/>
@@ -81,19 +106,20 @@
                                 <CheckBox x:Name="DaySat" Content="Sat"/>
                             </WrapPanel>
                             <StackPanel Orientation="Horizontal">
-                                <TextBlock Text="Allowed from " VerticalAlignment="Center"/>
-                                <TextBox x:Name="StartTimeBox" Width="60" Margin="4,0" Text="21:00"/>
+                                <TextBlock Text="Block from " VerticalAlignment="Center"/>
+                                <TextBox x:Name="StartTimeBox" Width="60" Margin="4,0" Text="23:00"/>
                                 <TextBlock Text=" to " VerticalAlignment="Center"/>
-                                <TextBox x:Name="EndTimeBox" Width="60" Margin="4,0" Text="23:00"/>
-                                <TextBlock Text=" (24-hour HH:mm)" VerticalAlignment="Center"
-                                           Foreground="Gray" Margin="4,0,0,0"/>
+                                <TextBox x:Name="EndTimeBox" Width="60" Margin="4,0" Text="07:00"/>
+                                <TextBlock VerticalAlignment="Center" Foreground="Gray"
+                                           Margin="6,0,0,0" FontSize="11"
+                                           Text="(24h HH:mm — overnight windows supported, e.g. 23:00–07:00)"/>
                             </StackPanel>
                         </StackPanel>
                     </GroupBox>
 
                     <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="0,8,0,0">
-                        <Button Content="Add Entry" Width="90" Margin="0,0,8,0" Click="AddSchedule_Click"/>
-                        <Button Content="Remove Selected" Width="120" Click="RemoveSchedule_Click"/>
+                        <Button Content="Add Window" Width="100" Margin="0,0,8,0" Click="AddWindow_Click"/>
+                        <Button Content="Remove Selected" Width="120" Click="RemoveWindow_Click"/>
                     </StackPanel>
                 </Grid>
             </TabItem>
@@ -102,7 +128,7 @@
             <TabItem Header="Advanced">
                 <Grid Margin="10">
                     <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="210"/>
+                        <ColumnDefinition Width="230"/>
                         <ColumnDefinition Width="90"/>
                         <ColumnDefinition Width="*"/>
                     </Grid.ColumnDefinitions>
@@ -129,18 +155,19 @@
                              Margin="0,4" VerticalAlignment="Center"/>
 
                     <TextBlock Grid.Row="3" Grid.Column="0" Grid.ColumnSpan="3"
-                               Margin="0,14,0,0" TextWrapping="Wrap"
-                               Foreground="Gray" FontStyle="Italic">
-                        For multiple or complex schedule windows, you can also edit<LineBreak/>
-                        %AppData%\GameGuard\config.json directly while the app is stopped.
+                               Margin="0,16,0,0" TextWrapping="Wrap"
+                               Foreground="Gray" FontStyle="Italic" FontSize="11">
+                        Default grace period is 300 seconds (5 minutes). Reduce only for testing.
+                        When enforcement is not needed, remove all blocked windows rather than raising the grace period.
+                        For complex schedules, edit %AppData%\GameGuard\config.json directly while the app is stopped.
                     </TextBlock>
                 </Grid>
             </TabItem>
 
         </TabControl>
 
-        <!-- Bottom bar -->
-        <StackPanel Grid.Row="1" Orientation="Horizontal"
+        <!-- Save / Cancel -->
+        <StackPanel Grid.Row="2" Orientation="Horizontal"
                     HorizontalAlignment="Right" Margin="0,10,0,0">
             <Button Content="Save" Width="80" Margin="0,0,8,0"
                     IsDefault="True" Click="Save_Click"/>

@@ -1,3 +1,4 @@
+using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
 using System.Timers;
@@ -8,8 +9,9 @@ using Timer = System.Timers.Timer;
 namespace GameGuard.Services;
 
 /// <summary>
-/// Polls for blocked processes every N seconds.
-/// All process control uses native .NET APIs — no shell commands.
+/// Polls for blocked processes on a configurable interval.
+/// All process control uses native .NET APIs — zero shell commands.
+/// AutoReset=false ensures no re-entrant poll ticks.
 /// </summary>
 public sealed class ProcessMonitor : IDisposable
 {
@@ -19,11 +21,17 @@ public sealed class ProcessMonitor : IDisposable
     private readonly NotifyIcon _tray;
     private readonly Timer _timer;
 
-    // Key: "blockedAppId|pid"  →  time of first detection in a blocked window
-    private readonly Dictionary<string, DateTime> _detectionTime = new();
+    // Key: "appId|pid" → UTC time grace period started
+    private readonly Dictionary<string, DateTime> _graceStartedUtc = new();
 
-    // Key: blockedAppId  →  time the last balloon warning was shown
-    private readonly Dictionary<string, DateTime> _lastWarningTime = new();
+    // Key: appId → UTC time last balloon was shown (per-app cooldown)
+    private readonly Dictionary<string, DateTime> _lastToastUtc = new();
+
+    // "appId|pid" keys for which a warning balloon has already been shown this grace period
+    private readonly HashSet<string> _warnedPidKeys = new();
+
+    // "appId|pid" keys for which verify_failed has been logged (avoid per-tick log spam)
+    private readonly HashSet<string> _verifyFailedLogged = new();
 
     public ProcessMonitor(
         ConfigService configService,
@@ -48,10 +56,12 @@ public sealed class ProcessMonitor : IDisposable
 
     public void Stop() => _timer.Stop();
 
+    // -----------------------------------------------------------------------
+
     private void OnTick(object? sender, ElapsedEventArgs e)
     {
         try { Poll(); }
-        catch { /* Keep the monitor alive on unexpected errors */ }
+        catch { /* Never let an unhandled exception kill the monitor */ }
         finally
         {
             _timer.Interval = _configService.Config.PollIntervalSeconds * 1000.0;
@@ -62,13 +72,27 @@ public sealed class ProcessMonitor : IDisposable
     private void Poll()
     {
         var config = _configService.Config;
-        bool allowed = _scheduleService.IsCurrentlyAllowed(config.Schedule);
-        var now = DateTime.Now;
+        var nowUtc = DateTime.UtcNow;
+
+        bool isBlocked = _scheduleService.IsCurrentlyBlocked(config.BlockedWindows);
+
+        if (!isBlocked)
+        {
+            // Time window lifted — cancel all pending grace timers (do not kill).
+            if (_graceStartedUtc.Count > 0)
+            {
+                _graceStartedUtc.Clear();
+                _warnedPidKeys.Clear();
+                _verifyFailedLogged.Clear();
+            }
+            return;
+        }
+
+        // ---- Blocked window is active — enforce ----
         var activePidKeys = new HashSet<string>();
 
         foreach (var app in config.BlockedApps)
         {
-            // GetProcessesByName expects name without extension
             var nameNoExt = Path.GetFileNameWithoutExtension(app.ProcessName);
 
             Process[] procs;
@@ -81,69 +105,79 @@ public sealed class ProcessMonitor : IDisposable
                 {
                     if (proc.HasExited) continue;
 
-                    // Optional strict path match
+                    var pidKey = $"{app.Id}|{proc.Id}";
+
+                    // ----------------------------------------------------------
+                    // Path verification for PathPinned apps.
+                    // Per spec: if pinned and cannot verify → log once and SKIP.
+                    // ----------------------------------------------------------
                     if (app.PathPinned && !string.IsNullOrEmpty(app.Path))
                     {
                         try
                         {
-                            var module = proc.MainModule?.FileName;
-                            if (module != null &&
-                                !string.Equals(Path.GetFullPath(module), app.Path,
-                                               StringComparison.OrdinalIgnoreCase))
-                                continue; // Different executable — not our target
-                        }
-                        catch
-                        {
-                            // Access denied reading MainModule.
-                            // Fall through: name matched, proceed with enforcement.
-                        }
-                    }
+                            var modulePath = proc.MainModule?.FileName;
 
-                    if (allowed)
-                    {
-                        _logger.Log("allowed_execution", app.ProcessName, $"pid={proc.Id}");
-                        continue;
-                    }
-
-                    // --- Outside allowed window ---
-                    var pidKey = $"{app.Id}|{proc.Id}";
-                    activePidKeys.Add(pidKey);
-
-                    if (!_detectionTime.TryGetValue(pidKey, out var detectedAt))
-                    {
-                        // First detection — warn and start grace period
-                        _detectionTime[pidKey] = now;
-                        _logger.Log("app_detected", app.ProcessName, $"pid={proc.Id}");
-
-                        var cooldownExpired =
-                            !_lastWarningTime.TryGetValue(app.Id, out var lastWarn) ||
-                            (now - lastWarn).TotalSeconds >= config.ToastCooldownSeconds;
-
-                        if (cooldownExpired)
-                        {
-                            _lastWarningTime[app.Id] = now;
-                            ShowWarning(app.ProcessName, config.GraceSeconds);
-                        }
-                    }
-                    else if ((now - detectedAt).TotalSeconds >= config.GraceSeconds)
-                    {
-                        // Grace period elapsed — terminate
-                        try
-                        {
-                            if (!proc.HasExited)
+                            if (modulePath == null)
                             {
-                                proc.Kill();
-                                _logger.Log("app_terminated", app.ProcessName, $"pid={proc.Id}");
+                                LogVerifyFailed(pidKey, app.ProcessName, proc.Id, "module_null");
+                                continue; // SKIP — cannot confirm identity
+                            }
+
+                            if (!string.Equals(
+                                    Path.GetFullPath(modulePath), app.Path,
+                                    StringComparison.OrdinalIgnoreCase))
+                            {
+                                continue; // Different executable — not our target
                             }
                         }
                         catch (Exception ex)
                         {
-                            _logger.Log("terminate_failed", app.ProcessName, ex.Message);
+                            LogVerifyFailed(pidKey, app.ProcessName, proc.Id, ex.GetType().Name);
+                            continue; // SKIP — cannot confirm identity
                         }
-
-                        _detectionTime.Remove(pidKey);
-                        activePidKeys.Remove(pidKey);
                     }
+
+                    activePidKeys.Add(pidKey);
+
+                    // ----------------------------------------------------------
+                    // Grace period tracking
+                    // ----------------------------------------------------------
+                    if (!_graceStartedUtc.TryGetValue(pidKey, out var graceStart))
+                    {
+                        // First detection in this blocked window — start grace timer.
+                        _graceStartedUtc[pidKey] = nowUtc;
+                        var plannedKillAt = nowUtc.AddSeconds(config.GraceSeconds);
+
+                        _logger.Log("blocked_detected", app.ProcessName, $"pid={proc.Id}");
+                        _logger.Log("grace_started", app.ProcessName,
+                            $"pid={proc.Id}, plannedKillAt={plannedKillAt:o}");
+
+                        // Show balloon once per instance, subject to per-app cooldown.
+                        if (!_warnedPidKeys.Contains(pidKey))
+                        {
+                            bool cooldownOk =
+                                !_lastToastUtc.TryGetValue(app.Id, out var lastToast) ||
+                                (nowUtc - lastToast).TotalSeconds >= config.ToastCooldownSeconds;
+
+                            if (cooldownOk)
+                            {
+                                _lastToastUtc[app.Id] = nowUtc;
+                                _warnedPidKeys.Add(pidKey);
+                                ShowWarning(app.DisplayName, config.GraceSeconds);
+                            }
+                        }
+                    }
+                    else if (nowUtc >= graceStart.AddSeconds(config.GraceSeconds))
+                    {
+                        // Grace period elapsed — terminate.
+                        TryTerminate(proc, app, pidKey);
+                        activePidKeys.Remove(pidKey); // already cleaned up in TryTerminate
+                    }
+                    // else: still within grace period — do nothing this tick
+                }
+                catch (Exception ex)
+                {
+                    _logger.Log("monitor_error", app.ProcessName, ex.Message);
                 }
                 finally
                 {
@@ -152,18 +186,60 @@ public sealed class ProcessMonitor : IDisposable
             }
         }
 
-        // Remove stale entries for processes that exited on their own
-        foreach (var stale in _detectionTime.Keys.Except(activePidKeys).ToList())
-            _detectionTime.Remove(stale);
+        // Remove grace entries for processes that exited on their own.
+        foreach (var stale in _graceStartedUtc.Keys.Except(activePidKeys).ToList())
+        {
+            _graceStartedUtc.Remove(stale);
+            _warnedPidKeys.Remove(stale);
+            _verifyFailedLogged.Remove(stale);
+        }
     }
 
-    private void ShowWarning(string processName, int graceSeconds)
+    private void TryTerminate(Process proc, BlockedApp app, string pidKey)
     {
-        // ShowBalloonTip is safe to call from a background thread
+        try
+        {
+            if (proc.HasExited) return;
+
+            proc.Kill();
+            _logger.Log("terminated_success", app.ProcessName, $"pid={proc.Id}");
+        }
+        catch (Win32Exception w32) when (w32.NativeErrorCode == 5) // ERROR_ACCESS_DENIED
+        {
+            // Target is elevated or otherwise protected — skip, do not retry.
+            _logger.Log("terminate_skipped", app.ProcessName,
+                $"pid={proc.Id}, reason=access_denied");
+        }
+        catch (Exception ex)
+        {
+            _logger.Log("terminated_failed", app.ProcessName,
+                $"pid={proc.Id}, {ex.GetType().Name}: {ex.Message}");
+        }
+        finally
+        {
+            _graceStartedUtc.Remove(pidKey);
+            _warnedPidKeys.Remove(pidKey);
+        }
+    }
+
+    private void LogVerifyFailed(string pidKey, string processName, int pid, string reason)
+    {
+        // Log once per (appId|pid) to avoid per-tick spam for elevated processes.
+        if (_verifyFailedLogged.Add(pidKey))
+            _logger.Log("verify_failed", processName, $"pid={pid}, reason={reason}");
+    }
+
+    private void ShowWarning(string displayName, int graceSeconds)
+    {
+        int minutes = graceSeconds / 60;
+        var timeStr = minutes >= 1
+            ? $"{minutes} minute{(minutes != 1 ? "s" : "")}"
+            : $"{graceSeconds} seconds";
+
         _tray.ShowBalloonTip(
-            graceSeconds * 1000,
-            "GameGuard — Access Restricted",
-            $"{processName} is not allowed right now and will be closed in {graceSeconds} seconds.",
+            10_000,
+            "GameGuard — Blocked Time",
+            $"Blocked time window active. {displayName} will close in {timeStr}.",
             ToolTipIcon.Warning);
     }
 

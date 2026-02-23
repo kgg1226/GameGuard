@@ -7,16 +7,21 @@ namespace GameGuard.Services;
 public sealed class ConfigService
 {
     private readonly string _configPath;
-    private readonly Logger _logger;
     private readonly JsonSerializerOptions _jsonOpts = new() { WriteIndented = true };
-
     private AppConfig _config;
 
     public AppConfig Config => _config;
 
+    /// <summary>Non-null if the config file failed to load. UI should surface this to the user.</summary>
+    public string? LoadError { get; private set; }
+
+    /// <summary>Exposes the logger so the UI layer can record add/remove events.</summary>
+    public Logger Logger { get; }
+
     public ConfigService(Logger logger)
     {
-        _logger = logger;
+        Logger = logger;
+
         var dir = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
             "GameGuard");
@@ -32,56 +37,60 @@ public sealed class ConfigService
         try
         {
             var json = File.ReadAllText(_configPath);
-            return JsonSerializer.Deserialize<AppConfig>(json, _jsonOpts) ?? new AppConfig();
+            var cfg = JsonSerializer.Deserialize<AppConfig>(json, _jsonOpts);
+            if (cfg == null)
+            {
+                LoadError = "File deserialized to null.";
+                Logger.Log("config_load_error", detail: LoadError);
+                return new AppConfig();
+            }
+            return cfg;
         }
-        catch { return new AppConfig(); }
+        catch (Exception ex)
+        {
+            LoadError = $"{ex.GetType().Name}: {ex.Message}";
+            Logger.Log("config_load_error", detail: LoadError);
+            return new AppConfig();
+        }
     }
 
-    /// <summary>Validate, normalize, persist, and replace in-memory config.</summary>
+    /// <summary>Validate, normalize paths, persist, replace in-memory config.</summary>
     public void Save(AppConfig config)
     {
         Validate(config);
 
-        // Normalize all stored paths
         foreach (var app in config.BlockedApps)
-        {
             if (!string.IsNullOrEmpty(app.Path))
                 app.Path = Path.GetFullPath(app.Path);
-        }
 
-        var json = JsonSerializer.Serialize(config, _jsonOpts);
-        File.WriteAllText(_configPath, json);
+        File.WriteAllText(_configPath, JsonSerializer.Serialize(config, _jsonOpts));
         _config = config;
-        _logger.Log("config_changed");
+        Logger.Log("config_changed");
     }
 
     private static void Validate(AppConfig config)
     {
         if (config.GraceSeconds < 1)
             throw new ArgumentException("Grace period must be at least 1 second.");
-
         if (config.PollIntervalSeconds < 1)
             throw new ArgumentException("Poll interval must be at least 1 second.");
 
-        foreach (var entry in config.Schedule)
+        foreach (var w in config.BlockedWindows)
         {
-            if (entry.Days.Count == 0)
-                throw new ArgumentException("Each schedule entry must have at least one day.");
-
-            if (!TryParseHHmm(entry.Start, out var start))
-                throw new ArgumentException($"Invalid start time: '{entry.Start}'. Use HH:mm.");
-
-            if (!TryParseHHmm(entry.End, out var end))
-                throw new ArgumentException($"Invalid end time: '{entry.End}'. Use HH:mm.");
-
-            if (end <= start)
-                throw new ArgumentException("Schedule end time must be later than start time.");
+            if (w.Days.Count == 0)
+                throw new ArgumentException("Each blocked window must have at least one day.");
+            if (!TimeSpan.TryParse(w.Start, out var start))
+                throw new ArgumentException($"Invalid start time: '{w.Start}'. Use HH:mm.");
+            if (!TimeSpan.TryParse(w.End, out var end))
+                throw new ArgumentException($"Invalid end time: '{w.End}'. Use HH:mm.");
+            if (start == end)
+                throw new ArgumentException("Start and end times cannot be equal.");
         }
     }
 
-    internal static bool TryParseHHmm(string text, out TimeSpan result)
+    /// <summary>Parses a HH:mm time string into a TimeSpan. Accepts "9:00" and "09:00".</summary>
+    internal static bool TryParseTime(string text, out TimeSpan result)
     {
-        // Accept "9:00", "09:00", "21:30" etc.
         if (!TimeSpan.TryParse(text.Trim(), out result)) return false;
         return result.Days == 0 && result.TotalHours < 24 && result.Seconds == 0;
     }

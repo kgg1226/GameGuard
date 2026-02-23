@@ -19,6 +19,10 @@ public sealed class Logger
         _logPath = Path.Combine(LogDirectory, "log.jsonl");
     }
 
+    /// <summary>
+    /// Appends a structured JSON line to log.jsonl.
+    /// Never throws — logging failures are silently swallowed.
+    /// </summary>
     public void Log(string eventType, string? processName = null, string? detail = null)
     {
         var entry = new

@@ -44,7 +44,7 @@ public partial class App : System.Windows.Application
 
         var menu = new ContextMenuStrip();
         menu.Items.Add("Open Settings",   null, (_, _) => OpenSettings());
-        menu.Items.Add("Current Status",  null, (_, _) => ShowStatus());
+        menu.Items.Add("Status",          null, (_, _) => ShowStatus());
         menu.Items.Add("Open Log Folder", null, (_, _) => OpenLogFolder());
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(_startupMenuItem);
@@ -56,9 +56,55 @@ public partial class App : System.Windows.Application
 
         _monitor = new ProcessMonitor(_configService, _scheduleService, _logger, _tray);
         _monitor.Start();
+
+        // Surface a config load error after the tray is ready.
+        if (_configService.LoadError != null)
+        {
+            _tray.ShowBalloonTip(8000,
+                "GameGuard — Config Warning",
+                $"config.json could not be loaded ({_configService.LoadError}). Default settings applied.",
+                ToolTipIcon.Warning);
+        }
     }
 
-    // ---- Startup registry helpers ----------------------------------------
+    // ---- Tray actions ------------------------------------------------------
+
+    private void OpenSettings()
+    {
+        var win = new SettingsWindow(_configService!);
+        win.ShowDialog();
+
+        // Restart monitor so any changed poll interval takes effect immediately.
+        _monitor?.Stop();
+        _monitor?.Start();
+    }
+
+    private void ShowStatus()
+    {
+        bool blocked = _scheduleService!.IsCurrentlyBlocked(_configService!.Config.BlockedWindows);
+        var msg = blocked
+            ? "BLOCKED NOW — enforcement is active."
+            : "ALLOWED NOW — no restrictions in effect.";
+        _tray?.ShowBalloonTip(4000, "GameGuard Status", msg,
+            blocked ? ToolTipIcon.Warning : ToolTipIcon.Info);
+    }
+
+    private void OpenLogFolder()
+    {
+        if (_logger == null) return;
+        try
+        {
+            Process.Start(new ProcessStartInfo
+            {
+                FileName = "explorer.exe",
+                Arguments = $"\"{_logger.LogDirectory}\"",
+                UseShellExecute = false
+            });
+        }
+        catch { /* Ignore */ }
+    }
+
+    // ---- Startup registry --------------------------------------------------
 
     private static bool IsStartupEnabled()
     {
@@ -88,46 +134,10 @@ public partial class App : System.Windows.Application
                 _startupMenuItem!.Checked = true;
             }
         }
-        catch { /* Ignore registry errors silently */ }
+        catch { /* Ignore registry errors */ }
     }
 
-    // ---- Tray actions -------------------------------------------------------
-
-    private void OpenSettings()
-    {
-        var win = new SettingsWindow(_configService!);
-        win.ShowDialog();
-
-        // Re-apply config in case poll interval changed
-        _monitor?.Stop();
-        _monitor?.Start();
-    }
-
-    private void ShowStatus()
-    {
-        bool allowed = _scheduleService!.IsCurrentlyAllowed(_configService!.Config.Schedule);
-        var msg = allowed
-            ? "ALLOWED — games may run right now."
-            : "BLOCKED — games will be terminated.";
-        _tray?.ShowBalloonTip(4000, "GameGuard Status", msg,
-            allowed ? ToolTipIcon.Info : ToolTipIcon.Warning);
-    }
-
-    private void OpenLogFolder()
-    {
-        if (_logger == null) return;
-        try
-        {
-            var psi = new ProcessStartInfo
-            {
-                FileName = "explorer.exe",
-                Arguments = $"\"{_logger.LogDirectory}\"",
-                UseShellExecute = false
-            };
-            Process.Start(psi);
-        }
-        catch { /* Ignore */ }
-    }
+    // ---- Lifecycle ---------------------------------------------------------
 
     private void ExitApp()
     {

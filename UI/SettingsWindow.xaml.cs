@@ -10,8 +10,8 @@ namespace GameGuard.UI;
 public partial class SettingsWindow : Window
 {
     private readonly ConfigService _configService;
-    private readonly ObservableCollection<BlockedApp> _apps;
-    private readonly ObservableCollection<ScheduleViewModel> _schedule;
+    private readonly ObservableCollection<BlockedAppViewModel> _apps;
+    private readonly ObservableCollection<BlockedWindowViewModel> _windows;
 
     public SettingsWindow(ConfigService configService)
     {
@@ -19,25 +19,34 @@ public partial class SettingsWindow : Window
         _configService = configService;
 
         var cfg = configService.Config;
-        _apps = new ObservableCollection<BlockedApp>(cfg.BlockedApps);
-        _schedule = new ObservableCollection<ScheduleViewModel>(
-            cfg.Schedule.Select(s => new ScheduleViewModel(s)));
+
+        _apps = new ObservableCollection<BlockedAppViewModel>(
+            cfg.BlockedApps.Select(a => new BlockedAppViewModel(a)));
+
+        _windows = new ObservableCollection<BlockedWindowViewModel>(
+            cfg.BlockedWindows.Select(w => new BlockedWindowViewModel(w)));
 
         AppsListView.ItemsSource = _apps;
-        ScheduleListView.ItemsSource = _schedule;
+        WindowsListView.ItemsSource = _windows;
 
         PollIntervalBox.Text = cfg.PollIntervalSeconds.ToString();
         GraceSecondsBox.Text = cfg.GraceSeconds.ToString();
         ToastCooldownBox.Text = cfg.ToastCooldownSeconds.ToString();
     }
 
-    // ---- Blocked Apps tab ------------------------------------------------
+    // ---- Blocked Apps tab --------------------------------------------------
 
-    private void AddApp_Click(object sender, RoutedEventArgs e)
+    private void AddLauncher_Click(object sender, RoutedEventArgs e) =>
+        AddApp(kind: "launcher", pathPinnedDefault: false);
+
+    private void AddGame_Click(object sender, RoutedEventArgs e) =>
+        AddApp(kind: "game", pathPinnedDefault: true);
+
+    private void AddApp(string kind, bool pathPinnedDefault)
     {
         var dlg = new Microsoft.Win32.OpenFileDialog
         {
-            Title = "Select Game Launcher Executable",
+            Title = $"Select {char.ToUpper(kind[0]) + kind[1..]} Executable",
             Filter = "Executables (*.exe)|*.exe|All Files (*.*)|*.*"
         };
 
@@ -45,33 +54,41 @@ public partial class SettingsWindow : Window
 
         var fullPath = Path.GetFullPath(dlg.FileName);
 
-        if (_apps.Any(a => string.Equals(a.Path, fullPath, StringComparison.OrdinalIgnoreCase)))
+        if (_apps.Any(a => string.Equals(a.Model.Path, fullPath, StringComparison.OrdinalIgnoreCase)))
         {
             MessageBox.Show(this, "That application is already in the list.",
                 "Duplicate", MessageBoxButton.OK, MessageBoxImage.Information);
             return;
         }
 
-        _apps.Add(new BlockedApp
+        var model = new BlockedApp
         {
-            Id = Guid.NewGuid().ToString("N")[..8],
+            Id = Guid.NewGuid().ToString(),
+            DisplayName = Path.GetFileNameWithoutExtension(fullPath),
+            Kind = kind,
             ProcessName = Path.GetFileName(fullPath),
             Path = fullPath,
-            PathPinned = PinPathCheckBox.IsChecked == true
-        });
+            PathPinned = pathPinnedDefault
+        };
+
+        _apps.Add(new BlockedAppViewModel(model));
+        _configService.Logger.Log("app_registered", model.ProcessName, $"kind={kind}");
     }
 
     private void RemoveApp_Click(object sender, RoutedEventArgs e)
     {
-        if (AppsListView.SelectedItem is BlockedApp app)
-            _apps.Remove(app);
+        if (AppsListView.SelectedItem is BlockedAppViewModel vm)
+        {
+            _configService.Logger.Log("app_removed", vm.Model.ProcessName);
+            _apps.Remove(vm);
+        }
     }
 
-    // ---- Schedule tab ----------------------------------------------------
+    // ---- Blocked Windows tab -----------------------------------------------
 
-    private void AddSchedule_Click(object sender, RoutedEventArgs e)
+    private void AddWindow_Click(object sender, RoutedEventArgs e)
     {
-        var days = CollectSelectedDays();
+        var days = CollectDays();
         if (days.Count == 0)
         {
             MessageBox.Show(this, "Select at least one day.",
@@ -79,42 +96,50 @@ public partial class SettingsWindow : Window
             return;
         }
 
-        if (!ConfigService.TryParseHHmm(StartTimeBox.Text, out var start))
+        if (!ConfigService.TryParseTime(StartTimeBox.Text, out var start))
         {
-            MessageBox.Show(this, "Start time must be in HH:mm format (e.g. 21:00).",
+            MessageBox.Show(this, "Start time must be in HH:mm format (e.g. 23:00).",
                 "Validation", MessageBoxButton.OK, MessageBoxImage.Warning);
             return;
         }
 
-        if (!ConfigService.TryParseHHmm(EndTimeBox.Text, out var end))
+        if (!ConfigService.TryParseTime(EndTimeBox.Text, out var end))
         {
-            MessageBox.Show(this, "End time must be in HH:mm format (e.g. 23:00).",
+            MessageBox.Show(this, "End time must be in HH:mm format (e.g. 07:00).",
                 "Validation", MessageBoxButton.OK, MessageBoxImage.Warning);
             return;
         }
 
-        if (end <= start)
+        if (start == end)
         {
-            MessageBox.Show(this, "End time must be later than start time.",
+            MessageBox.Show(this, "Start and end times cannot be the same.",
                 "Validation", MessageBoxButton.OK, MessageBoxImage.Warning);
             return;
         }
 
-        _schedule.Add(new ScheduleViewModel(new ScheduleEntry
+        var model = new BlockedWindow
         {
             Days = days,
             Start = StartTimeBox.Text.Trim(),
             End = EndTimeBox.Text.Trim()
-        }));
+        };
+
+        _windows.Add(new BlockedWindowViewModel(model));
+        _configService.Logger.Log("blocked_window_added",
+            detail: $"days=[{string.Join(",", days)}], {model.Start}-{model.End}");
     }
 
-    private void RemoveSchedule_Click(object sender, RoutedEventArgs e)
+    private void RemoveWindow_Click(object sender, RoutedEventArgs e)
     {
-        if (ScheduleListView.SelectedItem is ScheduleViewModel vm)
-            _schedule.Remove(vm);
+        if (WindowsListView.SelectedItem is BlockedWindowViewModel vm)
+        {
+            _configService.Logger.Log("blocked_window_removed",
+                detail: $"{vm.Model.Start}-{vm.Model.End}");
+            _windows.Remove(vm);
+        }
     }
 
-    private List<int> CollectSelectedDays()
+    private List<int> CollectDays()
     {
         var days = new List<int>();
         if (DaySun.IsChecked == true) days.Add(0);
@@ -127,7 +152,7 @@ public partial class SettingsWindow : Window
         return days;
     }
 
-    // ---- Bottom bar ------------------------------------------------------
+    // ---- Save / Cancel -----------------------------------------------------
 
     private void Save_Click(object sender, RoutedEventArgs e)
     {
@@ -154,8 +179,8 @@ public partial class SettingsWindow : Window
 
         var config = new AppConfig
         {
-            BlockedApps = _apps.ToList(),
-            Schedule = _schedule.Select(vm => vm.Model).ToList(),
+            BlockedApps = _apps.Select(vm => vm.Model).ToList(),
+            BlockedWindows = _windows.Select(vm => vm.Model).ToList(),
             PollIntervalSeconds = poll,
             GraceSeconds = grace,
             ToastCooldownSeconds = cooldown
@@ -174,25 +199,4 @@ public partial class SettingsWindow : Window
     }
 
     private void Cancel_Click(object sender, RoutedEventArgs e) => Close();
-}
-
-// ---------------------------------------------------------------------------
-// View model used only for displaying schedule rows in the ListView
-// ---------------------------------------------------------------------------
-
-public sealed class ScheduleViewModel
-{
-    private static readonly string[] DayNames = { "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat" };
-
-    public ScheduleEntry Model { get; }
-
-    public ScheduleViewModel(ScheduleEntry model) => Model = model;
-
-    public string DaysDisplay =>
-        string.Join(", ", Model.Days.OrderBy(d => d)
-                                    .Where(d => d is >= 0 and <= 6)
-                                    .Select(d => DayNames[d]));
-
-    public string Start => Model.Start;
-    public string End => Model.End;
 }
